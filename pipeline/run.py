@@ -16,16 +16,22 @@ def main() -> int:
     _configure_logging()
     parser = argparse.ArgumentParser(description="Backfill or incrementally scrape UFC historical fight data into SQLite/SQLAlchemy.")
     parser.add_argument("--full", action="store_true", help="Run a full backfill through the history of UFC events.")
-    parser.add_argument("--incremental", action="store_true", help="Scrape only the newest events and resume on existing data.")
+    # Incremental is the default. Keep the old flag as a no-op so existing
+    # scripts do not break, but omit it from help to keep normal usage simple.
+    parser.add_argument("--incremental", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--max-events", type=int, default=None, help="Limit how many events are processed per run.")
     parser.add_argument("--db-url", default="sqlite:///./ufc_fights.db", help="SQLAlchemy database URL; defaults to a local SQLite file.")
+    parser.add_argument("--delay", type=float, default=1.0, help="Minimum seconds between page requests (default: 1.0).")
+    parser.add_argument("--debug", action="store_true", help="Include selector, browser-session, and traceback diagnostics.")
     args = parser.parse_args()
 
-    if bool(args.full) == bool(args.incremental):
-        parser.error("Exactly one mode must be selected: --full or --incremental")
+    if args.full and args.incremental:
+        parser.error("--full and --incremental cannot be used together")
 
     init_db(args.db_url)
-    scraper = RateLimitedPlaywrightScraper(delay_seconds=1.5, headless=True)
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+    scraper = RateLimitedPlaywrightScraper(delay_seconds=args.delay, headless=True)
     mode = "full" if args.full else "incremental"
     logging.info("Starting %s scrape run against %s", mode, args.db_url)
     _, _, errors = run_pipeline(scraper=scraper, full=args.full, max_events=args.max_events)

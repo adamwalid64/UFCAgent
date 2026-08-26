@@ -1,6 +1,6 @@
 from datetime import date
 
-from pipeline.models import Event, Fight
+from pipeline.models import Event, Fight, FightRound, Fighter
 from pipeline.pipeline import build_fight_record, run_pipeline
 
 
@@ -21,6 +21,8 @@ def test_fight_schema_has_expected_columns():
         "fighter_b_control_time_seconds",
     }
     assert expected.issubset(columns)
+    assert {"wins", "losses", "fights", "last_fight_date"}.issubset({column.name for column in Fighter.__table__.columns})
+    assert {"fight_id", "round_number", "fighter_id"}.issubset({column.name for column in FightRound.__table__.columns})
 
 
 def test_build_fight_record_sets_joinable_ids_and_unique_hash():
@@ -87,14 +89,13 @@ def test_incremental_run_stops_after_first_known_event_in_newest_first_order():
             return getattr(__import__("pipeline.db", fromlist=["SessionLocal"]).SessionLocal(), name)
 
     import pipeline.pipeline as pipeline_module
-    original_session_local = pipeline_module.SessionLocal
-    pipeline_module.SessionLocal = lambda: __import__("sqlalchemy.orm", fromlist=["Session"]).sessionmaker(bind=db)()
-
-    try:
-        inserted_events, inserted_fights, errors = pipeline_module.run_pipeline(FakeScraper(), full=False)
-    finally:
-        pipeline_module.SessionLocal = original_session_local
+    inserted_events, inserted_fights, errors = pipeline_module.run_pipeline(FakeScraper(), full=False)
 
     assert inserted_events == 1
     assert inserted_fights == 1
     assert errors == []
+
+    with __import__("sqlalchemy.orm", fromlist=["Session"]).Session(db) as check:
+        fighter_a = check.get(Fighter, "a")
+        assert fighter_a.fights == 1
+        assert fighter_a.wins == 1

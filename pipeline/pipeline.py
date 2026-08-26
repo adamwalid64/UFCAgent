@@ -5,10 +5,11 @@ import re
 from datetime import date, datetime
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .db import SessionLocal
-from .models import Event, Fight
+from . import db as database
+from .models import Event, Fight, FightRound, Fighter
 
 
 def slugify(value: str | None) -> str:
@@ -61,12 +62,18 @@ def build_fight_record(
     fighter_b_stats: dict[str, Any] | None = None,
     source_fight_url: str | None = None,
     head_to_head_fight_count: int = 0,
+    fighter_a_id: str | None = None,
+    fighter_b_id: str | None = None,
+    method_detail: str | None = None,
+    result: str | None = None,
+    referee: str | None = None,
+    time_format: str | None = None,
 ) -> dict[str, Any]:
     fighter_a_stats = fighter_a_stats or {}
     fighter_b_stats = fighter_b_stats or {}
 
-    fighter_a_id = build_fighter_id(fighter_a_name)
-    fighter_b_id = build_fighter_id(fighter_b_name)
+    fighter_a_id = fighter_a_id or build_fighter_id(fighter_a_name)
+    fighter_b_id = fighter_b_id or build_fighter_id(fighter_b_name)
     winner_fighter_id = build_fighter_id(winner_name) if winner_name else None
 
     return {
@@ -88,6 +95,11 @@ def build_fight_record(
         "fighter_a_takedowns_landed": fighter_a_stats.get("takedowns_landed"),
         "fighter_a_takedowns_attempted": fighter_a_stats.get("takedowns_attempted"),
         "fighter_a_control_time_seconds": fighter_a_stats.get("control_time_seconds"),
+        "fighter_a_total_strikes_landed": fighter_a_stats.get("total_strikes_landed"),
+        "fighter_a_total_strikes_attempted": fighter_a_stats.get("total_strikes_attempted"),
+        "fighter_a_knockdowns": fighter_a_stats.get("knockdowns"),
+        "fighter_a_submission_attempts": fighter_a_stats.get("submission_attempts"),
+        "fighter_a_reversals": fighter_a_stats.get("reversals"),
         "fighter_a_days_since_last_fight": fighter_a_stats.get("days_since_last_fight"),
         "fighter_b_id": fighter_b_id,
         "fighter_b_name": fighter_b_name,
@@ -105,11 +117,19 @@ def build_fight_record(
         "fighter_b_takedowns_landed": fighter_b_stats.get("takedowns_landed"),
         "fighter_b_takedowns_attempted": fighter_b_stats.get("takedowns_attempted"),
         "fighter_b_control_time_seconds": fighter_b_stats.get("control_time_seconds"),
+        "fighter_b_total_strikes_landed": fighter_b_stats.get("total_strikes_landed"),
+        "fighter_b_total_strikes_attempted": fighter_b_stats.get("total_strikes_attempted"),
+        "fighter_b_knockdowns": fighter_b_stats.get("knockdowns"),
+        "fighter_b_submission_attempts": fighter_b_stats.get("submission_attempts"),
+        "fighter_b_reversals": fighter_b_stats.get("reversals"),
         "fighter_b_days_since_last_fight": fighter_b_stats.get("days_since_last_fight"),
         "winner_fighter_id": winner_fighter_id,
         "winner_name": winner_name,
         "method_of_victory": method_of_victory,
-        "method_detail": None,
+        "method_detail": method_detail,
+        "result": result,
+        "referee": referee,
+        "time_format": time_format,
         "ending_round": ending_round,
         "ending_time": ending_time,
         "head_to_head_fight_count": head_to_head_fight_count,
@@ -144,71 +164,143 @@ def upsert_fight(session: Session, fight_payload: dict[str, Any]) -> Fight:
     return fight
 
 
+def ensure_fighter(session: Session, fighter_id: str, name: str, profile_url: str | None = None) -> Fighter:
+    fighter = session.get(Fighter, fighter_id)
+    if fighter is None:
+        fighter = Fighter(fighter_id=fighter_id, fighter_name=name, profile_url=profile_url)
+        session.add(fighter)
+    else:
+        fighter.fighter_name = name
+        fighter.profile_url = profile_url or fighter.profile_url
+    session.flush()
+    return fighter
+
+
+def _prior_stats(fighter: Fighter, event_date: date) -> dict[str, Any]:
+    return {
+        "wins": fighter.wins, "losses": fighter.losses, "draws": fighter.draws,
+        "current_win_streak": fighter.current_win_streak, "current_loss_streak": fighter.current_loss_streak,
+        "days_since_last_fight": (event_date - fighter.last_fight_date).days if fighter.last_fight_date else None,
+    }
+
+
+def _update_aggregate(fighter: Fighter, stats: dict[str, Any], outcome: str, event_date: date) -> None:
+    fighter.fights += 1
+    if outcome == "win":
+        fighter.wins += 1
+        fighter.current_win_streak += 1
+        fighter.current_loss_streak = 0
+    elif outcome == "loss":
+        fighter.losses += 1
+        fighter.current_loss_streak += 1
+        fighter.current_win_streak = 0
+    elif outcome == "draw":
+        fighter.draws += 1
+        fighter.current_win_streak = 0
+        fighter.current_loss_streak = 0
+    elif outcome == "no_contest":
+        fighter.no_contests += 1
+    for field in ("significant_strikes_landed", "significant_strikes_attempted", "takedowns_landed", "takedowns_attempted", "control_time_seconds"):
+        setattr(fighter, field, (getattr(fighter, field) or 0) + (stats.get(field) or 0))
+    fighter.last_fight_date = event_date
+
+
+def _upsert_rounds(session: Session, fight_id: str, rounds: list[dict[str, Any]], a_id: str, b_id: str) -> None:
+    for round_payload in rounds:
+        number = round_payload["round_number"]
+        for side, fighter_id, opponent_id in (("fighter_a", a_id, b_id), ("fighter_b", b_id, a_id)):
+            values = round_payload.get(side) or {}
+            existing = session.scalar(select(FightRound).where(FightRound.fight_id == fight_id, FightRound.round_number == number, FightRound.fighter_id == fighter_id))
+            record = {key: values.get(key) for key in ("knockdowns", "significant_strikes_landed", "significant_strikes_attempted", "total_strikes_landed", "total_strikes_attempted", "takedowns_landed", "takedowns_attempted", "submission_attempts", "reversals", "control_time_seconds")}
+            record.update({"fight_id": fight_id, "round_number": number, "fighter_id": fighter_id, "opponent_id": opponent_id})
+            if existing is None:
+                session.add(FightRound(**record))
+            else:
+                for key, value in record.items():
+                    setattr(existing, key, value)
+
+
 def run_pipeline(scraper, full: bool = False, max_events: int | None = None) -> tuple[int, int, list[str]]:
-    session = SessionLocal()
+    session = database.SessionLocal()
     inserted_events = 0
     inserted_fights = 0
     errors: list[str] = []
 
     try:
-        existing_event_ids = set()
-        if not full:
-            existing_event_ids = {row[0] for row in session.execute(__import__("sqlalchemy").select(Event.event_id)).all()}
+        existing_event_ids = {row[0] for row in session.execute(select(Event.event_id)).all()}
+        event_summary = scraper.crawl_event_listing(max_events=max_events)
+        errors.extend(f"Listing failed: {error.source_url}: {error.message}" for error in getattr(event_summary, "errors", []))
 
-        event_summary = scraper.crawl_event_listing(max_events=max_events if not full else None)
-        processed_event_count = 0
-
+        pending: list[dict[str, Any]] = []
         for event_url in event_summary.event_urls:
-            if max_events is not None and processed_event_count >= max_events and not full:
-                break
-
             try:
-                event_payload = scraper.crawl_event_details(event_url)
-                event_record = build_event_record(event_payload)
-                event_id = event_record["event_id"]
-
-                if not full and event_id in existing_event_ids:
-                    logging.info("Skipping already-known event in incremental mode: %s", event_id)
+                payload = scraper.crawl_event_details(event_url)
+                if not full and build_event_record(payload)["event_id"] in existing_event_ids:
                     break
+                pending.append(payload)
+            except Exception as exc:
+                errors.append(f"Event page failed: {event_url}: {exc}")
+        # UFCStats is newest-first; aggregation and pre-fight features require chronological ingestion.
+        pending.sort(key=lambda payload: parse_event_date(payload.get("event_date")) or date.min)
 
+        total_pending = len(pending)
+        logging.info("%s event(s) queued in chronological order", total_pending)
+        for event_index, event_payload in enumerate(pending, 1):
+            try:
+                logging.info("[%s/%s] %s", event_index, total_pending, event_payload.get("event_name") or event_payload.get("event_url"))
                 event = ensure_event(session, event_payload)
-                existing_event_ids.add(event.event_id)
                 inserted_events += 1
-                processed_event_count += 1
-
                 fight_urls = event_payload.get("fight_urls") or []
-                if not fight_urls:
-                    session.commit()
-                    continue
-
-                for fight_url in fight_urls:
+                for fight_index, fight_url in enumerate(fight_urls, 1):
                     try:
                         fight_payload = scraper.crawl_fight_card(fight_url)
                         fight_id = fight_payload.get("fight_id") or fight_url
                         if session.get(Fight, fight_id) is not None:
                             continue
-
-                        fight_record = build_fight_record(
-                            event=event,
-                            fight_id=fight_id,
-                            fighter_a_name=fight_payload.get("fighter_a_name") or "Unknown Fighter A",
-                            fighter_b_name=fight_payload.get("fighter_b_name") or "Unknown Fighter B",
-                            winner_name=fight_payload.get("winner_name"),
-                            method_of_victory=fight_payload.get("method_of_victory"),
-                            ending_round=fight_payload.get("ending_round"),
-                            ending_time=fight_payload.get("ending_time"),
-                            source_fight_url=fight_payload.get("source_fight_url") or fight_url,
-                        )
-                        upsert_fight(session, fight_record)
+                        a_name = fight_payload.get("fighter_a_name") or "Unknown Fighter A"
+                        b_name = fight_payload.get("fighter_b_name") or "Unknown Fighter B"
+                        logging.info("  [%s/%s] %s vs %s", fight_index, len(fight_urls), a_name, b_name)
+                        a_id = fight_payload.get("fighter_a_id") or build_fighter_id(a_name)
+                        b_id = fight_payload.get("fighter_b_id") or build_fighter_id(b_name)
+                        fighter_a = ensure_fighter(session, a_id, a_name, fight_payload.get("fighter_a_url"))
+                        fighter_b = ensure_fighter(session, b_id, b_name, fight_payload.get("fighter_b_url"))
+                        a_stats = {**(fight_payload.get("fighter_a_stats") or {}), **_prior_stats(fighter_a, event.event_date)}
+                        b_stats = {**(fight_payload.get("fighter_b_stats") or {}), **_prior_stats(fighter_b, event.event_date)}
+                        winner = fight_payload.get("winner_name")
+                        prior_h2h = session.scalar(select(__import__("sqlalchemy").func.count(Fight.fight_id)).where(
+                            ((Fight.fighter_a_id == a_id) & (Fight.fighter_b_id == b_id)) | ((Fight.fighter_a_id == b_id) & (Fight.fighter_b_id == a_id)))) or 0
+                        record = build_fight_record(event, fight_id, a_name, b_name, winner, fight_payload.get("method_of_victory"),
+                            fight_payload.get("ending_round"), fight_payload.get("ending_time"), a_stats, b_stats,
+                            fight_payload.get("source_fight_url") or fight_url, prior_h2h, a_id, b_id,
+                            fight_payload.get("method_detail"), fight_payload.get("result"), fight_payload.get("referee"), fight_payload.get("time_format"))
+                        upsert_fight(session, record)
+                        _upsert_rounds(session, fight_id, fight_payload.get("rounds") or [], a_id, b_id)
+                        result = fight_payload.get("result")
+                        if result in {"draw", "no_contest"}:
+                            outcome_a = outcome_b = result
+                        else:
+                            outcome_a = "win" if winner == a_name else "loss"
+                            outcome_b = "win" if winner == b_name else "loss"
+                        _update_aggregate(fighter_a, fight_payload.get("fighter_a_stats") or {}, outcome_a, event.event_date)
+                        _update_aggregate(fighter_b, fight_payload.get("fighter_b_stats") or {}, outcome_b, event.event_date)
                         inserted_fights += 1
-                    except Exception as exc:  # pragma: no cover - failed individual fight page
-                        errors.append(f"Fight page failed: {fight_url}: {exc}")
+                    except Exception as exc:
+                        message = f"Fight page failed: {fight_url}: {exc}"
+                        logging.warning("  %s", message)
+                        logging.debug("Fight failure details", exc_info=True)
+                        errors.append(message)
                 session.commit()
-            except Exception as exc:  # pragma: no cover - failed event page
-                errors.append(f"Event page failed: {event_url}: {exc}")
+            except Exception as exc:
+                message = f"Event page failed: {event_payload.get('event_url')}: {exc}"
+                logging.warning("%s", message)
+                logging.debug("Event failure details", exc_info=True)
+                errors.append(message)
                 session.rollback()
     finally:
         session.close()
+        close = getattr(scraper, "close", None)
+        if callable(close):
+            close()
 
     logging.info("Pipeline summary: events=%s fights=%s errors=%s", inserted_events, inserted_fights, len(errors))
     return inserted_events, inserted_fights, errors
