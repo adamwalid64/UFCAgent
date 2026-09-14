@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 
 from sqlalchemy import (
+    Boolean,
     Column,
     Date,
     DateTime,
@@ -21,7 +22,7 @@ Base = declarative_base()
 
 
 class Fighter(Base):
-    """Normalized fighter dimension used to join historical performance across fights."""
+    """Current/latest fighter profile and aggregates; not a historical feature snapshot."""
 
     __tablename__ = "fighters"
 
@@ -29,10 +30,11 @@ class Fighter(Base):
     fighter_name = Column(String, nullable=False, index=True)
     fighter_nickname = Column(String, nullable=True)
     date_of_birth = Column(Date, nullable=True)
-    height_inches = Column(Integer, nullable=True, comment="Height in inches at time of last known profile.")
-    reach_inches = Column(Integer, nullable=True, comment="Reach in inches at time of fight.")
-    stance = Column(String, nullable=True, comment="Fighter stance, e.g. orthodox, southpaw, switch.")
+    height_inches = Column(Integer, nullable=True, comment="Height in inches from the latest known profile.")
+    reach_inches = Column(Integer, nullable=True, comment="Reach in inches from the latest known profile.")
+    stance = Column(String, nullable=True, comment="Latest known stance, e.g. orthodox, southpaw, switch.")
     profile_url = Column(String, nullable=True)
+    profile_scraped_at = Column(DateTime(timezone=True), nullable=True)
     fights = Column(Integer, nullable=False, default=0)
     wins = Column(Integer, nullable=False, default=0)
     losses = Column(Integer, nullable=False, default=0)
@@ -60,6 +62,8 @@ class Event(Base):
     event_date = Column(Date, nullable=False, index=True)
     event_location = Column(String, nullable=True)
     event_url = Column(String, nullable=True)
+    source_fight_count = Column(Integer, nullable=True)
+    last_scraped_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
@@ -78,13 +82,24 @@ class Fight(Base):
 
     fighter_a_id = Column(String, ForeignKey("fighters.fighter_id"), nullable=False, index=True)
     fighter_a_name = Column(String, nullable=False, index=True)
+    weight_class = Column(String, nullable=True, index=True)
+    card_order = Column(Integer, nullable=True, comment="UFCStats card row order; 1 is the top/main-event row.")
+    event_method_code = Column(String, nullable=True, comment="Method label shown on the UFCStats event table.")
+    stats_available = Column(Boolean, nullable=False, default=False, server_default="0")
     fighter_a_age = Column(Integer, nullable=True, comment="Age of Fighter A at the time of the fight.")
     fighter_a_height_inches = Column(Integer, nullable=True, comment="Height of Fighter A in inches.")
     fighter_a_reach_inches = Column(Integer, nullable=True, comment="Reach of Fighter A in inches.")
     fighter_a_stance = Column(String, nullable=True, comment="Stance of Fighter A.")
-    fighter_a_wins = Column(Integer, nullable=True, comment="Career wins for Fighter A entering the fight.")
-    fighter_a_losses = Column(Integer, nullable=True, comment="Career losses for Fighter A entering the fight.")
-    fighter_a_draws = Column(Integer, nullable=True, comment="Career draws for Fighter A entering the fight.")
+    fighter_a_profile_imputed = Column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="0",
+        comment="True when fight-time profile values were filled from the current fighter profile.",
+    )
+    fighter_a_wins = Column(Integer, nullable=True, comment="Prior UFCStats wins for Fighter A entering the fight.")
+    fighter_a_losses = Column(Integer, nullable=True, comment="Prior UFCStats losses for Fighter A entering the fight.")
+    fighter_a_draws = Column(Integer, nullable=True, comment="Prior UFCStats draws for Fighter A entering the fight.")
     fighter_a_current_win_streak = Column(Integer, nullable=True, comment="Current win streak for Fighter A entering the fight.")
     fighter_a_current_loss_streak = Column(Integer, nullable=True, comment="Current loss streak for Fighter A entering the fight.")
     fighter_a_significant_strikes_landed = Column(Integer, nullable=True, comment="Significant strikes landed by Fighter A.")
@@ -97,6 +112,18 @@ class Fight(Base):
     fighter_a_knockdowns = Column(Integer, nullable=True)
     fighter_a_submission_attempts = Column(Integer, nullable=True)
     fighter_a_reversals = Column(Integer, nullable=True)
+    fighter_a_significant_head_strikes_landed = Column(Integer, nullable=True)
+    fighter_a_significant_head_strikes_attempted = Column(Integer, nullable=True)
+    fighter_a_significant_body_strikes_landed = Column(Integer, nullable=True)
+    fighter_a_significant_body_strikes_attempted = Column(Integer, nullable=True)
+    fighter_a_significant_leg_strikes_landed = Column(Integer, nullable=True)
+    fighter_a_significant_leg_strikes_attempted = Column(Integer, nullable=True)
+    fighter_a_significant_distance_strikes_landed = Column(Integer, nullable=True)
+    fighter_a_significant_distance_strikes_attempted = Column(Integer, nullable=True)
+    fighter_a_significant_clinch_strikes_landed = Column(Integer, nullable=True)
+    fighter_a_significant_clinch_strikes_attempted = Column(Integer, nullable=True)
+    fighter_a_significant_ground_strikes_landed = Column(Integer, nullable=True)
+    fighter_a_significant_ground_strikes_attempted = Column(Integer, nullable=True)
     fighter_a_days_since_last_fight = Column(Integer, nullable=True, comment="Days since Fighter A's last fight before this bout.")
 
     fighter_b_id = Column(String, ForeignKey("fighters.fighter_id"), nullable=False, index=True)
@@ -105,9 +132,16 @@ class Fight(Base):
     fighter_b_height_inches = Column(Integer, nullable=True, comment="Height of Fighter B in inches.")
     fighter_b_reach_inches = Column(Integer, nullable=True, comment="Reach of Fighter B in inches.")
     fighter_b_stance = Column(String, nullable=True, comment="Stance of Fighter B.")
-    fighter_b_wins = Column(Integer, nullable=True, comment="Career wins for Fighter B entering the fight.")
-    fighter_b_losses = Column(Integer, nullable=True, comment="Career losses for Fighter B entering the fight.")
-    fighter_b_draws = Column(Integer, nullable=True, comment="Career draws for Fighter B entering the fight.")
+    fighter_b_profile_imputed = Column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="0",
+        comment="True when fight-time profile values were filled from the current fighter profile.",
+    )
+    fighter_b_wins = Column(Integer, nullable=True, comment="Prior UFCStats wins for Fighter B entering the fight.")
+    fighter_b_losses = Column(Integer, nullable=True, comment="Prior UFCStats losses for Fighter B entering the fight.")
+    fighter_b_draws = Column(Integer, nullable=True, comment="Prior UFCStats draws for Fighter B entering the fight.")
     fighter_b_current_win_streak = Column(Integer, nullable=True, comment="Current win streak for Fighter B entering the fight.")
     fighter_b_current_loss_streak = Column(Integer, nullable=True, comment="Current loss streak for Fighter B entering the fight.")
     fighter_b_significant_strikes_landed = Column(Integer, nullable=True, comment="Significant strikes landed by Fighter B.")
@@ -120,6 +154,18 @@ class Fight(Base):
     fighter_b_knockdowns = Column(Integer, nullable=True)
     fighter_b_submission_attempts = Column(Integer, nullable=True)
     fighter_b_reversals = Column(Integer, nullable=True)
+    fighter_b_significant_head_strikes_landed = Column(Integer, nullable=True)
+    fighter_b_significant_head_strikes_attempted = Column(Integer, nullable=True)
+    fighter_b_significant_body_strikes_landed = Column(Integer, nullable=True)
+    fighter_b_significant_body_strikes_attempted = Column(Integer, nullable=True)
+    fighter_b_significant_leg_strikes_landed = Column(Integer, nullable=True)
+    fighter_b_significant_leg_strikes_attempted = Column(Integer, nullable=True)
+    fighter_b_significant_distance_strikes_landed = Column(Integer, nullable=True)
+    fighter_b_significant_distance_strikes_attempted = Column(Integer, nullable=True)
+    fighter_b_significant_clinch_strikes_landed = Column(Integer, nullable=True)
+    fighter_b_significant_clinch_strikes_attempted = Column(Integer, nullable=True)
+    fighter_b_significant_ground_strikes_landed = Column(Integer, nullable=True)
+    fighter_b_significant_ground_strikes_attempted = Column(Integer, nullable=True)
     fighter_b_days_since_last_fight = Column(Integer, nullable=True, comment="Days since Fighter B's last fight before this bout.")
 
     winner_fighter_id = Column(String, ForeignKey("fighters.fighter_id"), nullable=True, index=True)
@@ -134,6 +180,7 @@ class Fight(Base):
     head_to_head_fight_count = Column(Integer, nullable=True, default=0, comment="Number of prior fights between these two fighters before this bout.")
     source_event_url = Column(String, nullable=True)
     source_fight_url = Column(String, nullable=True)
+    last_scraped_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
@@ -159,6 +206,18 @@ class FightRound(Base):
     submission_attempts = Column(Integer, nullable=False, default=0)
     reversals = Column(Integer, nullable=False, default=0)
     control_time_seconds = Column(Integer, nullable=True)
+    significant_head_strikes_landed = Column(Integer, nullable=True)
+    significant_head_strikes_attempted = Column(Integer, nullable=True)
+    significant_body_strikes_landed = Column(Integer, nullable=True)
+    significant_body_strikes_attempted = Column(Integer, nullable=True)
+    significant_leg_strikes_landed = Column(Integer, nullable=True)
+    significant_leg_strikes_attempted = Column(Integer, nullable=True)
+    significant_distance_strikes_landed = Column(Integer, nullable=True)
+    significant_distance_strikes_attempted = Column(Integer, nullable=True)
+    significant_clinch_strikes_landed = Column(Integer, nullable=True)
+    significant_clinch_strikes_attempted = Column(Integer, nullable=True)
+    significant_ground_strikes_landed = Column(Integer, nullable=True)
+    significant_ground_strikes_attempted = Column(Integer, nullable=True)
 
 
 __all__ = ["Base", "Event", "Fight", "FightRound", "Fighter"]

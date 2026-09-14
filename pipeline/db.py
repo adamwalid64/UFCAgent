@@ -3,11 +3,12 @@ from __future__ import annotations
 import os
 from typing import Iterator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from .models import Base
+from .migrations import upgrade_schema
 
 
 def get_database_url() -> str:
@@ -19,7 +20,15 @@ def get_engine(database_url: str | None = None) -> Engine:
     engine_kwargs = {"future": True}
     if url.startswith("sqlite"):
         engine_kwargs["connect_args"] = {"check_same_thread": False}
-    return create_engine(url, **engine_kwargs)
+    database_engine = create_engine(url, **engine_kwargs)
+    if url.startswith("sqlite"):
+        @event.listens_for(database_engine, "connect")
+        def _enable_sqlite_integrity(dbapi_connection, _connection_record) -> None:
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA busy_timeout=5000")
+            cursor.close()
+    return database_engine
 
 
 engine = get_engine()
@@ -31,6 +40,7 @@ def init_db(database_url: str | None = None) -> Engine:
     engine = get_engine(database_url)
     SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, future=True)
     Base.metadata.create_all(bind=engine)
+    upgrade_schema(engine)
     return engine
 
 

@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest-run*/
+pytest-cache-files-*/
+
+# Weekly pipeline artifacts. Keep the promoted canonical DB tracked explicitly.
+data_runs/
+.*.weekly.lock
+*.previous.db
+.*.previous.db.*.tmp
+smoke*.db

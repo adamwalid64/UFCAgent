@@ -50,7 +50,7 @@ def test_build_fight_record_sets_joinable_ids_and_unique_hash():
     assert fight["winner_fighter_id"] == "alpha-fighter"
 
 
-def test_incremental_run_stops_after_first_known_event_in_newest_first_order():
+def test_incremental_run_repairs_gaps_and_refreshes_recent_events():
     class FakeScraper:
         def crawl_event_listing(self, max_events=None):
             return type("Summary", (), {"event_urls": ["event-3", "event-2", "event-1"]})()
@@ -91,11 +91,13 @@ def test_incremental_run_stops_after_first_known_event_in_newest_first_order():
     import pipeline.pipeline as pipeline_module
     inserted_events, inserted_fights, errors = pipeline_module.run_pipeline(FakeScraper(), full=False)
 
-    assert inserted_events == 1
-    assert inserted_fights == 1
+    # Missing historical cards are no longer hidden behind the first known
+    # event, and the recent known card is reconciled as well.
+    assert inserted_events == 3
+    assert inserted_fights == 3
     assert errors == []
 
     with __import__("sqlalchemy.orm", fromlist=["Session"]).Session(db) as check:
         fighter_a = check.get(Fighter, "a")
-        assert fighter_a.fights == 1
-        assert fighter_a.wins == 1
+        assert fighter_a.fights == 3
+        assert fighter_a.wins == 3
