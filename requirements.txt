@@ -1,3 +1,12 @@
+# Data pipeline
 playwright>=1.40
 SQLAlchemy>=2.0
+
+# Agents (code/)
+langchain>=1.0
+langchain-community
+langchain-openai
+langgraph
+
+# Tests
 pytest>=8.0
