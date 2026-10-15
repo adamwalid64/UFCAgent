@@ -1,0 +1,62 @@
+# Channel titles and canonical /channel/ URLs verified from YouTube handle pages
+# on 2026-10-11. See YOUTUBE_MCP_NOTES.md for the verification references.
+# active selects sources; youtube_coverage.json.enabled controls collection.
+# Permission declarations default false; being listed does not grant access rights.
+sources:
+  - name: MMA Guru
+    channel_id: UCIhQvpinmS8Eq6PrQ021DKQ
+    handle: '@the-mma-guru'
+    type: prediction
+    active: true
+    credibility_weight: 1.0
+    transcript_access_authorized: true
+  - name: White Piece MMA
+    channel_id: UCOb2TSO5mwGdkwzYNtjlAlA
+    handle: '@white-piece-mma'
+    type: prediction
+    active: true
+    credibility_weight: 1.0
+    transcript_access_authorized: true
+  - name: Horsebeef MMA
+    channel_id: UCNQClXZDN0QWliPqyHNfLWw
+    handle: '@Horsebeef647'
+    type: prediction
+    active: true
+    credibility_weight: 1.0
+    transcript_access_authorized: true
+  - name: Robin Black
+    channel_id: UCTXp35WW-53vg66Y_IM952g
+    handle: '@RobinBlack'
+    type: technical breakdown
+    active: true
+    credibility_weight: 1.0
+    transcript_access_authorized: true
+  - name: Luke Thomas
+    channel_id: UC2EuJ9xTs0XkDZI9YGx7QZA
+    handle: '@lukethomas'
+    type: technical breakdown / analysis
+    active: true
+    credibility_weight: 1.0
+    transcript_access_authorized: true
+  # User explicitly confirmed keeping these two earlier requested sources active.
+  - name: Lucas Tracy MMA
+    channel_id: UC7LzaJA-R2E52qzd5GW-kpg
+    handle: '@LucasTracyMMA1'
+    type: prediction
+    active: true
+    credibility_weight: 1.0
+    transcript_access_authorized: true
+  - name: MMA Che
+    channel_id: UC8qJ5LhpoW1jeqx5yLAiC_w
+    handle: '@mmache.'
+    type: prediction
+    active: true
+    credibility_weight: 1.0
+    transcript_access_authorized: true
+
+  # Additional sources: activate only after user approval and ID verification.
+  # - name: Approved channel name
+  #   channel_id: VERIFIED_YOUTUBE_CHANNEL_ID
+  #   type: prediction
+  #   active: false
+  #   credibility_weight: 1.0

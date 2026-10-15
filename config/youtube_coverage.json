@@ -1,0 +1,35 @@
+{
+  "enabled": true,
+  "sources_path": "config/sentiment_sources.yaml",
+  "cache_dir": "data_cache/youtube",
+  "api_key_env": "YOUTUBE_API_KEY",
+  "proxy_env": "YOUTUBE_TRANSCRIPT_PROXY",
+  "languages": ["en"],
+  "discovery_ttl_hours": 6,
+  "event_timezone": "America/New_York",
+  "retention_days": 30,
+  "daily_quota_units": 500,
+  "lookback_days": 21,
+  "max_pages_per_channel": 4,
+  "max_videos_per_fight": 6,
+  "max_candidates_per_fight": 30,
+  "max_excerpt_chars": 12000,
+  "request_timeout": 30,
+  "retries": 2,
+  "backoff_seconds": 1,
+  "failure_ttl_hours": 6,
+  "mcp": null,
+  "whisper_enabled": false,
+  "whisper_model": "base",
+  "whisper_timeout": 900,
+  "max_audio_seconds": 7200,
+  "non_youtube": {
+    "written_enabled": false,
+    "outlets": [
+      {"name": "MMA Junkie", "active": false, "allowed_hosts": ["mmajunkie.usatoday.com"], "terms_url": "https://www.gannett.com/terms-of-use/"},
+      {"name": "MMA Fighting", "active": false, "allowed_hosts": ["www.mmafighting.com"], "terms_url": "https://www.voxmedia.com/legal/terms-of-use"},
+      {"name": "ESPN", "active": false, "allowed_hosts": ["www.espn.com"], "terms_url": "https://disneytermsofuse.com/"}
+    ],
+    "reddit": {"enabled": false, "automated_access_allowed": false, "thread_urls": [], "credibility_weight": 0.2}
+  }
+}

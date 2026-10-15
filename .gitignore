@@ -4,9 +4,16 @@ __pycache__/
 .pytest_cache/
 .pytest-run*/
 pytest-cache-files-*/
+# Local credentials and environment overrides
+.env
+.env.*
+!.env.example
 
 # Weekly pipeline artifacts. Keep the promoted canonical DB tracked explicitly.
 data_runs/
+predictions/
+data_cache/
+config/youtube_coverage.local.json
 .*.weekly.lock
 *.previous.db
 .*.previous.db.*.tmp

@@ -220,4 +220,39 @@ class FightRound(Base):
     significant_ground_strikes_attempted = Column(Integer, nullable=True)
 
 
-__all__ = ["Base", "Event", "Fight", "FightRound", "Fighter"]
+class UpcomingEvent(Base):
+    """Latest next-card schedule, kept out of completed-event history."""
+
+    __tablename__ = "upcoming_events"
+    event_id = Column(String, primary_key=True)
+    event_name = Column(String, nullable=False)
+    event_date = Column(Date, nullable=False, index=True)
+    event_location = Column(String, nullable=True)
+    event_url = Column(String, nullable=False, unique=True)
+    source_fight_count = Column(Integer, nullable=False)
+    last_scraped_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class UpcomingFight(Base):
+    """Announced pairing, not a result or a career observation.
+
+    Fighter IDs deliberately have no FK to fighters: debutants may have no
+    completed UFCStats history and must not create empty career records.
+    """
+
+    __tablename__ = "upcoming_fights"
+    __table_args__ = (UniqueConstraint("event_id", "card_order", name="uq_upcoming_card_order"),)
+    fight_id = Column(String, primary_key=True)
+    event_id = Column(String, ForeignKey("upcoming_events.event_id", ondelete="CASCADE"), nullable=False)
+    card_order = Column(Integer, nullable=False)
+    fighter_a_id = Column(String, nullable=False)
+    fighter_a_name = Column(String, nullable=False)
+    fighter_b_id = Column(String, nullable=False)
+    fighter_b_name = Column(String, nullable=False)
+    weight_class = Column(String, nullable=True)
+    is_title_bout = Column(Boolean, nullable=False, default=False)
+    scheduled_rounds = Column(Integer, nullable=True)
+    source_fight_url = Column(String, nullable=False)
+
+
+__all__ = ["Base", "Event", "Fight", "FightRound", "Fighter", "UpcomingEvent", "UpcomingFight"]

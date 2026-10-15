@@ -4,12 +4,14 @@ import re
 import time
 import logging
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 from playwright.sync_api import Page, sync_playwright
 
 UFC_EVENTS_URL = "http://www.ufcstats.com/statistics/events/completed?page=all"
+UFC_UPCOMING_EVENTS_URL = "http://www.ufcstats.com/statistics/events/upcoming?page=all"
 DEFAULT_REQUEST_DELAY_SECONDS = 1.0
 DEFAULT_MAX_ATTEMPTS = 3
 log = logging.getLogger(__name__)
@@ -142,6 +144,50 @@ def parse_event_fight_summary(
 def _none_if_missing(value: str | None) -> str | None:
     result = clean(value)
     return None if not result or result.lower() in {"--", "n/a", "na"} else result
+
+
+def parse_upcoming_fight(headers: list[str], row: dict[str, Any], card_order: int) -> dict[str, Any]:
+    """Read a scheduled pairing without interpreting empty result/stat cells as zeros."""
+    summary = parse_event_fight_summary(headers, row.get("cells") or [], row.get("fight_url", ""), card_order)
+    if not re.fullmatch(r"[a-f0-9]{16}", summary["fight_id"]):
+        raise ValueError("Upcoming fight is missing a valid UFCStats identity")
+    if summary["method_of_victory"] or clean(row.get("result")):
+        raise ValueError("Upcoming card already contains results; refresh after it is completed")
+    fighters = row.get("fighters") or []
+    if len(fighters) != 2:
+        raise ValueError("Upcoming pairing must contain two identified fighters")
+    result = {key: summary[key] for key in ("fight_id", "card_order", "weight_class")}
+    for side, fighter in zip(("a", "b"), fighters):
+        fid = stable_id(fighter.get("url"))
+        name = clean(fighter.get("name"))
+        if not re.fullmatch(r"[a-f0-9]{16}", fid) or not name:
+            raise ValueError("Upcoming fighter is missing a source ID or name")
+        result[f"fighter_{side}_id"] = fid
+        result[f"fighter_{side}_name"] = name
+    if result["fighter_a_id"] == result["fighter_b_id"]:
+        raise ValueError("Upcoming pairing repeats the same fighter")
+    return {**result, "source_fight_url": summary["fight_url"],
+            "is_title_bout": bool(row.get("is_title_bout")), "scheduled_rounds": None}
+
+
+def parse_remaining_fights(headers: list[str], rows: list[dict]) -> tuple[list[dict], int]:
+    """Select explicit matchups, preserving source order and excluding outcomes."""
+    if not rows:
+        raise ValueError("Event has no published fight rows")
+    remaining, completed = [], 0
+    seen = set()
+    for position, row in enumerate(rows, 1):
+        summary = parse_event_fight_summary(headers, row.get("cells") or [], row.get("fight_url", ""), position)
+        if not re.fullmatch(r"[a-f0-9]{16}", summary["fight_id"]) or summary["fight_id"] in seen:
+            raise ValueError("Invalid or duplicate event fight identity")
+        seen.add(summary["fight_id"])
+        if clean(row.get("result")) or summary["method_of_victory"]:
+            completed += 1
+            continue
+        if not any(clean(c.get("text")).casefold() == "view matchup" for c in row["cells"]):
+            raise ValueError("Fight has neither a result nor an explicit View Matchup status; refresh later")
+        remaining.append(parse_upcoming_fight(headers, row, position))
+    return remaining, completed
 
 
 def _parse_height_inches(value: str | None) -> int | None:
@@ -294,6 +340,7 @@ class ScrapeSummary:
     event_urls: list[str] = field(default_factory=list)
     fight_urls: list[str] = field(default_factory=list)
     errors: list[ScrapeError] = field(default_factory=list)
+    deferred_events: list[dict[str, str]] = field(default_factory=list)
 
 
 class RateLimitedPlaywrightScraper:
@@ -387,8 +434,11 @@ class RateLimitedPlaywrightScraper:
         value = clean(cell.inner_text())
         return value, value
 
-    def crawl_event_listing(self, listing_url: str = UFC_EVENTS_URL, max_events: int | None = None) -> ScrapeSummary:
+    def crawl_event_listing(self, listing_url: str = UFC_EVENTS_URL, max_events: int | None = None,
+                            *, today: date | None = None) -> ScrapeSummary:
         summary = ScrapeSummary()
+        today = today or date.today()
+        self._event_metadata.clear()
         try:
             log.info("Fetching completed-events listing...")
             page = self._ensure_page()
@@ -410,11 +460,27 @@ class RateLimitedPlaywrightScraper:
             )
             for row in rows:
                 url = clean(row["url"])
-                self._event_metadata[url] = {
+                metadata = {
                     "event_name": clean(row["name"]),
                     "event_date": clean(row["date"]),
                     "event_location": clean(row["location"]),
                 }
+                event_day = datetime.strptime(metadata["event_date"], "%B %d, %Y").date()
+                # UFCStats moves a card to /completed while it is still live.
+                # Only explicit unplayed matchups on a current/future card may
+                # be deferred; malformed historical stats must still fail.
+                if event_day >= today:
+                    card = self.crawl_event_details(url)
+                    if card.get("has_unplayed_bouts"):
+                        summary.deferred_events.append({
+                            **metadata, "event_url": url,
+                            "reason": "Card still contains View Matchup rows without results",
+                        })
+                        log.info("Deferring unfinished card: %s (%s)", metadata["event_name"], event_day)
+                        continue
+                    if event_day > today:
+                        raise ValueError(f"Completed event has a future date: {url}")
+                self._event_metadata[url] = metadata
                 summary.event_urls.append(url)
             log.info("Found %s completed events", len(summary.event_urls))
         except Exception as exc:
@@ -457,7 +523,126 @@ class RateLimitedPlaywrightScraper:
             self._fight_metadata[summary["fight_id"]] = summary
         fight_urls = [summary["fight_url"] for summary in fight_summaries]
         log.debug("Event %s contains %s fights", meta.get("event_name") or event_url, len(fight_urls))
-        return {**meta, "event_url": event_url, "fight_urls": fight_urls, "fight_summaries": fight_summaries}
+        has_unplayed_bouts = any(
+            not clean(row["cells"][0].get("text"))
+            and any(clean(cell.get("text")).casefold() == "view matchup" for cell in row["cells"])
+            for row in raw_rows if row.get("cells")
+        )
+        return {**meta, "event_url": event_url, "fight_urls": fight_urls,
+                "fight_summaries": fight_summaries, "has_unplayed_bouts": has_unplayed_bouts}
+
+    def crawl_upcoming_card(self, today: date | None = None) -> dict[str, Any] | None:
+        """Fetch the nearest unplayed card from the separate upcoming listing."""
+        today = today or date.today()
+        page = self._ensure_page()
+        self._open(page, UFC_UPCOMING_EVENTS_URL, "table")
+        headers = " ".join(page.locator("th").all_text_contents()).upper()
+        if "NAME/DATE" not in headers or "LOCATION" not in headers:
+            raise ValueError("Upcoming-events listing has an unexpected table layout")
+        rows = page.locator("tr.b-statistics__table-row").evaluate_all(
+            """rows => rows.map(row => {
+                const link = row.querySelector('a[href*="event-details/"]');
+                const cells = row.querySelectorAll('td');
+                const date = row.querySelector('span.b-statistics__date');
+                return link ? {url: link.href, name: link.textContent,
+                    date: date ? date.textContent : '',
+                    location: cells.length > 1 ? cells[1].textContent : ''} : null;
+            }).filter(Boolean)"""
+        )
+        candidates = []
+        for row in rows:
+            day = datetime.strptime(clean(row["date"]), "%B %d, %Y").date()
+            if day >= today:
+                candidates.append((day, row))
+        if not candidates:
+            return None
+        day, event = min(candidates, key=lambda item: (item[0], item[1]["url"]))
+        event_url = clean(event["url"])
+        self._open(page, event_url, "table")
+        validate_loaded_source_identity(event_url, page.url, "Upcoming event page")
+        metadata = parse_labeled_metadata(page.locator("li.b-list__box-list-item").all_text_contents())
+        if metadata.get("date"):
+            detail_day = datetime.strptime(metadata["date"], "%B %d, %Y").date()
+            if detail_day != day:
+                raise ValueError("Upcoming listing and card disagree on event date")
+        headers = page.locator("thead.b-fight-details__table-head th").all_text_contents()
+        raw_rows = page.locator("tr.b-fight-details__table-row[data-link]").evaluate_all(
+            """rows => rows.map(row => ({
+                fight_url: row.getAttribute('data-link') || '',
+                result: row.querySelector('td')?.textContent || '',
+                is_title_bout: !!row.querySelector('img[src*="belt"]'),
+                fighters: Array.from(row.querySelectorAll('a[href*="fighter-details/"]'))
+                    .map(a => ({name:a.textContent, url:a.href})),
+                cells: Array.from(row.querySelectorAll(':scope > td')).map(cell => ({
+                    text: cell.textContent || '',
+                    paragraphs: Array.from(cell.querySelectorAll(':scope > p')).map(p => p.textContent || '')
+                }))
+            }))"""
+        )
+        if not raw_rows:
+            raise ValueError("Next upcoming card has no published pairings; cached card was not replaced")
+        fights = [parse_upcoming_fight(headers, row, position) for position, row in enumerate(raw_rows, 1)]
+        log.info("Fetched next card: %s (%s, %s fights)", clean(event["name"]), day, len(fights))
+        return {"event_id": stable_id(event_url), "event_name": clean(event["name"]),
+                "event_date": day.isoformat(), "event_location": clean(event["location"]),
+                "event_url": event_url, "fights": fights}
+
+    def crawl_remaining_card(self, event: str) -> dict[str, Any]:
+        """Read an explicit event's remaining matchups without ingesting results."""
+        page = self._ensure_page()
+        query = clean(event)
+        if re.fullmatch(r"[a-f0-9]{16}", query):
+            query = f"http://www.ufcstats.com/event-details/{query}"
+        if "://" in query:
+            parsed = urlparse(query)
+            if (parsed.scheme not in {"http", "https"}
+                    or parsed.netloc not in {"ufcstats.com", "www.ufcstats.com"}
+                    or not re.fullmatch(r"/event-details/[a-f0-9]{16}", parsed.path)
+                    or parsed.query or parsed.fragment):
+                raise ValueError("--event URL must identify a UFCStats event")
+            event_url = f"http://www.ufcstats.com{parsed.path}"
+        else:
+            tokens = set(re.findall(r"[a-z0-9]+", query.casefold()))
+            if not tokens:
+                raise ValueError("Provide an event name, source ID, or UFCStats URL")
+            matches = {}
+            for listing_url in (UFC_EVENTS_URL, UFC_UPCOMING_EVENTS_URL):
+                self._open(page, listing_url, "tr.b-statistics__table-row")
+                links = page.locator('a[href*="event-details/"]').evaluate_all(
+                    "links => links.map(a => ({url:a.href, name:a.textContent}))"
+                )
+                for link in links:
+                    if tokens.issubset(set(re.findall(r"[a-z0-9]+", clean(link["name"]).casefold()))):
+                        matches[link["url"]] = clean(link["name"])
+            if len(matches) != 1:
+                raise ValueError(f"Event name matched {len(matches)} cards; use the specific UFCStats event URL")
+            event_url = next(iter(matches))
+        self._open(page, event_url, "tr.b-fight-details__table-row[data-link]")
+        validate_loaded_source_identity(event_url, page.url, "Remaining card")
+        metadata = parse_labeled_metadata(page.locator("li.b-list__box-list-item").all_text_contents())
+        day = datetime.strptime(metadata["date"], "%B %d, %Y").date()
+        headers = page.locator("thead.b-fight-details__table-head th").all_text_contents()
+        rows = page.locator("tr.b-fight-details__table-row[data-link]").evaluate_all(
+            """rows => rows.map(row => ({
+                fight_url: row.getAttribute('data-link') || '',
+                result: row.querySelector('td')?.textContent || '',
+                is_title_bout: !!row.querySelector('img[src*="belt"]'),
+                fighters: Array.from(row.querySelectorAll('a[href*="fighter-details/"]'))
+                    .map(a => ({name:a.textContent, url:a.href})),
+                cells: Array.from(row.querySelectorAll(':scope > td')).map(cell => ({
+                    text: cell.textContent || '',
+                    paragraphs: Array.from(cell.querySelectorAll(':scope > p')).map(p => p.textContent || '')
+                }))
+            }))"""
+        )
+        fights, completed = parse_remaining_fights(headers, rows)
+        return {"event_id": stable_id(event_url), "event_url": event_url,
+                "event_name": clean(page.locator("h2.b-content__title").inner_text()),
+                "event_date": day.isoformat(), "fights": fights, "completed_fights": completed,
+                "source_fight_count": len(rows), "live_remaining": True,
+                "last_scraped_at": datetime.now(timezone.utc).isoformat(),
+                "caveats": ["Only fights without posted results are included. UFCStats may lag the broadcast; a listed bout may already be underway.",
+                            "Analysis uses history strictly before the event date; today's results are excluded."]}
 
     def crawl_fighter_profile(self, fighter_url: str) -> dict[str, Any]:
         """Fetch one fighter profile, preserving source nulls as ``None`` instead of zeroes."""

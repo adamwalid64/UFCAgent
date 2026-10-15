@@ -2,7 +2,9 @@
 param(
     [string]$Database,
     [string]$BootstrapFrom,
+    [string]$ResumeFrom,
     [switch]$Full,
+    [switch]$PostCard,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$AdditionalArguments
 )
@@ -22,6 +24,9 @@ $python = $venvPython
 $refreshArguments = @("-B", "-m", "pipeline.weekly", "--db", $Database)
 if ($BootstrapFrom) {
     $refreshArguments += @("--bootstrap-from", $BootstrapFrom)
+}
+if ($ResumeFrom) {
+    $refreshArguments += @("--resume-from", $ResumeFrom)
 }
 if ($Full) {
     $refreshArguments += "--full"
@@ -59,6 +64,10 @@ try {
     }
     else {
         & $python @refreshArguments
+        $refreshExitCode = $LASTEXITCODE
+    }
+    if ($PostCard -and $refreshExitCode -eq 0) {
+        & $python -B -u -m pipeline.post_card
         $refreshExitCode = $LASTEXITCODE
     }
 }

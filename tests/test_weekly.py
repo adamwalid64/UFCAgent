@@ -187,6 +187,9 @@ class FakeFirstPartyScraper:
     def close(self):
         return None
 
+    def crawl_upcoming_card(self):
+        return None
+
     def _event(self, **identity):
         key, expected = next(iter(identity.items()))
         for event in self.events:
@@ -357,6 +360,69 @@ def test_failed_weekly_candidate_cannot_change_live_database(
     assert len(audit_rows) == 2
     assert audit_rows[-1]["ok"] is False
     assert audit_rows[-1]["promoted_to"] is None
+
+
+def test_resume_preserves_seed_and_revalidates_before_promotion(monkeypatch, weekly_workspace):
+    scenario = {"event_count": 1}
+    _install_fake(monkeypatch, scenario)
+    database = weekly_workspace / "live.db"
+    kwargs = {"delay_seconds": 0, "runs_directory": weekly_workspace / "runs"}
+    code, _, _ = weekly.refresh_database(database, **kwargs)
+    assert code == 0
+    live_hash = _sha256(database)
+    live_counts = _counts(database)
+    scenario.update(event_count=2, corrupt_fight_totals=True)
+    code, failed_run, _ = weekly.refresh_database(database, refresh_events=0, **kwargs)
+    assert code == 1
+    seed = failed_run / "live.staging.db"
+    seed_hash = _sha256(seed)
+    assert _counts(seed)[:2] == (2, 2)
+
+    scenario["corrupt_fight_totals"] = False
+    # The source has recovered, but copying the invalid seed alone cannot pass.
+    code, _, report = weekly.refresh_database(database, resume_from=seed, refresh_events=0, **kwargs)
+    assert code == 1 and not report.ok
+    assert _sha256(database) == live_hash
+
+    requested = []
+    original = FakeFirstPartyScraper.crawl_event_details
+    def crawl(self, url):
+        requested.append(url)
+        return original(self, url)
+    monkeypatch.setattr(FakeFirstPartyScraper, "crawl_event_details", crawl)
+    code, run, report = weekly.refresh_database(database, resume_from=seed, refresh_events=1, **kwargs)
+    assert code == 0 and report.ok
+    assert requested == [EVENT_TWO]
+    assert _counts(database)[:2] == (2, 2)
+    assert _sha256(seed) == seed_hash
+    assert _counts(weekly_workspace / "live.previous.db") == live_counts
+    assert _json(run / "manifest.json")["resumed_from"] == str(seed.resolve())
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+def test_truncated_listing_is_retried_without_inventing_source_urls(monkeypatch, weekly_workspace, persistent):
+    _install_fake(monkeypatch, {"event_count": 2})
+    database = weekly_workspace / "live.db"
+    kwargs = {"delay_seconds": 0, "runs_directory": weekly_workspace / "runs"}
+    assert weekly.refresh_database(database, **kwargs)[0] == 0
+    live_hash = _sha256(database)
+    original = FakeFirstPartyScraper.crawl_event_listing
+    attempts = []
+    def listing(self, max_events=None):
+        attempts.append(1)
+        result = original(self, max_events)
+        if persistent or len(attempts) == 1:
+            result.event_urls = [EVENT_TWO]
+        return result
+    monkeypatch.setattr(FakeFirstPartyScraper, "crawl_event_listing", listing)
+    code, run, report = weekly.refresh_database(database, refresh_events=0, **kwargs)
+    assert len(attempts) == (3 if persistent else 2)
+    assert code == (1 if persistent else 0)
+    manifest = _json(run / "manifest.json")
+    assert manifest["listing"]["event_urls"] == ([EVENT_TWO] if persistent else [EVENT_TWO, EVENT_ONE])
+    if persistent:
+        assert _sha256(database) == live_hash
+        assert any(c.check_id == "coverage.source_listing" and c.status == "FAIL" for c in report.checks)
 
 
 def test_cross_volume_runs_directory_is_rejected_before_scraper_starts(
@@ -571,3 +637,44 @@ def test_staging_refresh_restores_database_globals(monkeypatch, weekly_workspace
     assert code == 0 and report.ok
     assert weekly.database.engine is original_engine
     assert weekly.database.SessionLocal is original_session_local
+
+
+def test_weekly_promotes_upcoming_card_and_failed_refresh_preserves_live(monkeypatch, weekly_workspace):
+    from sql_agent.cards import load_next_card
+
+    scenario = {"event_count": 1}
+    _install_fake(monkeypatch, scenario)
+    upcoming = {
+        "event_id": "dddddddddddddddd", "event_name": "UFC Next Fixture", "event_date": "2099-01-01",
+        "event_location": "Test City", "event_url": "http://www.ufcstats.com/event-details/dddddddddddddddd",
+        "fights": [{"fight_id": "cccccccccccccccc", "card_order": 1,
+                    "fighter_a_id": "aaaaaaaaaaaaaaaa", "fighter_a_name": "New Alpha",
+                    "fighter_b_id": "bbbbbbbbbbbbbbbb", "fighter_b_name": "New Beta",
+                    "weight_class": "Lightweight", "is_title_bout": False, "scheduled_rounds": None,
+                    "source_fight_url": "http://www.ufcstats.com/fight-details/cccccccccccccccc"}],
+    }
+
+    def crawl(_self):
+        if scenario.get("upcoming_failure"):
+            raise RuntimeError("Upcoming source unavailable")
+        return upcoming
+
+    monkeypatch.setattr(FakeFirstPartyScraper, "crawl_upcoming_card", crawl)
+    database = weekly_workspace / "live.db"
+    kwargs = {"delay_seconds": 0, "runs_directory": weekly_workspace / "runs"}
+    code, run, report = weekly.refresh_database(database, full=True, **kwargs)
+    assert code == 0 and report.ok
+    assert load_next_card(database)["fights"][0]["fighter_a_name"] == "New Alpha"
+    # The two schedule debutants must not create fake zero-fight career rows.
+    assert _counts(database) == (1, 1, 2, 2)
+    assert _json(run / "manifest.json")["upcoming"]["fights"] == 1
+    before = _sha256(database)
+    scenario["upcoming_failure"] = True
+    code, run, report = weekly.refresh_database(database, **kwargs)
+    assert code == 1 and not report.ok
+    assert _sha256(database) == before
+    assert any("Upcoming card refresh failed" in error["message"] for error in _json(run / "manifest.json")["errors"])
+    # Explicit history-only refresh can proceed, retaining the saved schedule.
+    code, _, report = weekly.refresh_database(database, scrape_upcoming=False, **kwargs)
+    assert code == 0 and report.ok
+    assert len(load_next_card(database)["fights"]) == 1

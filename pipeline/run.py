@@ -56,6 +56,7 @@ def main() -> int:
         help="Allow this low-level CLI to write directly to the canonical database (bypasses staging/validation).",
     )
     parser.add_argument("--debug", action="store_true", help="Include selector, browser-session, and traceback diagnostics.")
+    parser.add_argument("--skip-upcoming", action="store_true", help="Refresh completed history only; keep the cached next card.")
     args = parser.parse_args()
 
     if args.full and args.incremental:
@@ -89,6 +90,7 @@ def main() -> int:
         metadata_limit=args.metadata_limit,
         allow_source_deletions=args.allow_source_deletions,
         profile_max_age_days=args.profile_max_age_days,
+        scrape_upcoming=not args.skip_upcoming,
     )
     if errors:
         logging.warning("Scrape completed with %s page-level errors:", len(errors))

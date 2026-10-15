@@ -78,6 +78,7 @@ class AuditedScraper:
         self.listing_succeeded = False
         self.listing_fetched_at: str | None = None
         self.listing_urls: list[str] = []
+        self.deferred_events: list[dict[str, str]] = []
         self.event_requested: set[str] = set()
         self.event_succeeded: set[str] = set()
         self.event_fights: dict[str, list[str]] = {}
@@ -85,12 +86,14 @@ class AuditedScraper:
         self.fight_succeeded: set[str] = set()
         self.profile_requested: set[str] = set()
         self.profile_succeeded: set[str] = set()
+        self.upcoming_audit: dict[str, Any] = {"requested": False, "succeeded": False}
 
     def crawl_event_listing(self, *args, **kwargs):
         self.listing_requested = True
         summary = self.scraper.crawl_event_listing(*args, **kwargs)
         self.listing_fetched_at = datetime.now(timezone.utc).isoformat()
         self.listing_urls = list(dict.fromkeys(getattr(summary, "event_urls", []) or []))
+        self.deferred_events = list(getattr(summary, "deferred_events", []) or [])
         self.listing_succeeded = bool(self.listing_urls) and not getattr(summary, "errors", [])
         return summary
 
@@ -114,6 +117,23 @@ class AuditedScraper:
         payload = self.scraper.crawl_fighter_profile(fighter_url)
         self.profile_succeeded.add(fighter_url)
         return payload
+
+    @property
+    def crawl_upcoming_card(self):
+        crawler = getattr(self.scraper, "crawl_upcoming_card", None)
+        if not callable(crawler):
+            return None
+
+        def crawl():
+            self.upcoming_audit["requested"] = True
+            card = crawler()
+            self.upcoming_audit.update(
+                succeeded=True, event_url=card["event_url"] if card else None,
+                fights=len(card["fights"]) if card else 0,
+            )
+            return card
+
+        return crawl
 
     def close(self) -> None:
         self.scraper.close()
@@ -218,6 +238,7 @@ def _build_manifest(
             "fetched_at": scraper.listing_fetched_at,
             "event_urls": scraper.listing_urls,
             "latest_event_date": latest,
+            "deferred_events": scraper.deferred_events,
         },
         "event_fights": cards,
         "page_counts": {
@@ -232,6 +253,7 @@ def _build_manifest(
             "failed_pages": 0 if not errors else len(errors),
         },
         "feature_columns": list(SAFE_PREDICTION_FEATURE_COLUMNS),
+        "upcoming": scraper.upcoming_audit,
     }
 
 
@@ -389,6 +411,7 @@ def _refresh_database_unlocked(
     database_path: Path,
     *,
     bootstrap_from: Path | None = None,
+    resume_from: Path | None = None,
     full: bool = False,
     delay_seconds: float = 1.0,
     refresh_events: int = 8,
@@ -396,6 +419,7 @@ def _refresh_database_unlocked(
     backfill_metadata: bool = True,
     max_events: int | None = None,
     runs_directory: Path | None = None,
+    scrape_upcoming: bool = True,
 ) -> tuple[int, Path, ValidationReport]:
     """Refresh, gate, and promote one SQLite database.
 
@@ -421,7 +445,11 @@ def _refresh_database_unlocked(
 
     baseline = database_path if _database_has_fights(database_path) else None
     base = baseline
-    if base is None and bootstrap_from is not None:
+    if resume_from is not None:
+        base = resume_from.resolve()
+        if not _database_has_fights(base):
+            raise ValueError(f"Resume database has no fights: {base}")
+    elif base is None and bootstrap_from is not None:
         bootstrap = bootstrap_from.resolve()
         if not _database_has_fights(bootstrap):
             raise ValueError(f"Bootstrap database has no fights: {bootstrap}")
@@ -447,6 +475,7 @@ def _refresh_database_unlocked(
             scrape_profiles=True,
             backfill_profiles=backfill_profiles,
             backfill_metadata=backfill_metadata,
+            scrape_upcoming=scrape_upcoming,
         )
     finally:
         try:
@@ -474,6 +503,8 @@ def _refresh_database_unlocked(
     )
     manifest["processed_events"] = processed_events
     manifest["processed_fights"] = processed_fights
+    if resume_from is not None:
+        manifest["resumed_from"] = str(resume_from.resolve())
     manifest_path = run_directory / "manifest.json"
     report_path = run_directory / "validation.json"
     _atomic_json(manifest_path, manifest)
@@ -495,6 +526,9 @@ def _refresh_database_unlocked(
 
     if not report.ok:
         _append_audit(run_root / "audit.jsonl", report, None)
+        for check in report.checks:
+            if check.status == "FAIL":
+                log.error("Validation %s: %s", check.check_id, check.message)
         log.error(
             "Candidate failed validation (%s hard failure(s)); live database was not changed. "
             "Staging retained at %s",
@@ -530,6 +564,7 @@ def refresh_database(
     database_path: Path,
     *,
     bootstrap_from: Path | None = None,
+    resume_from: Path | None = None,
     full: bool = False,
     delay_seconds: float = 1.0,
     refresh_events: int = 8,
@@ -537,6 +572,7 @@ def refresh_database(
     backfill_metadata: bool = True,
     max_events: int | None = None,
     runs_directory: Path | None = None,
+    scrape_upcoming: bool = True,
 ) -> tuple[int, Path, ValidationReport]:
     """Run one complete staging/validation/promotion cycle under an OS lock."""
 
@@ -551,6 +587,7 @@ def refresh_database(
         return _refresh_database_unlocked(
             resolved_database,
             bootstrap_from=bootstrap_from,
+            resume_from=resume_from,
             full=full,
             delay_seconds=delay_seconds,
             refresh_events=refresh_events,
@@ -558,6 +595,7 @@ def refresh_database(
             backfill_metadata=backfill_metadata,
             max_events=max_events,
             runs_directory=runs_directory,
+            scrape_upcoming=scrape_upcoming,
         )
 
 
@@ -569,6 +607,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--bootstrap-from",
         help="Existing completed scrape used only when --db has no fights.",
+    )
+    parser.add_argument(
+        "--resume-from",
+        help="Copy a retained staging database, refresh it, and validate against the live database before promotion.",
     )
     parser.add_argument("--full", action="store_true", help="Refresh every event and fight page.")
     parser.add_argument("--max-events", type=int, default=None, help="Limit source events for a smoke run only.")
@@ -586,6 +628,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--runs-dir", help="Directory for staging files and validation audit artifacts.")
     parser.add_argument("--debug", action="store_true", help="Enable detailed diagnostics.")
+    parser.add_argument("--skip-upcoming", action="store_true", help="Refresh completed history only; keep the cached next card.")
     return parser
 
 
@@ -609,6 +652,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         exit_code, run_directory, report = refresh_database(
             Path(args.db),
             bootstrap_from=Path(args.bootstrap_from) if args.bootstrap_from else None,
+            resume_from=Path(args.resume_from) if args.resume_from else None,
             full=args.full,
             delay_seconds=args.delay,
             refresh_events=args.refresh_events,
@@ -616,6 +660,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             backfill_metadata=not args.skip_metadata_backfill,
             max_events=args.max_events,
             runs_directory=Path(args.runs_dir) if args.runs_dir else None,
+            scrape_upcoming=not args.skip_upcoming,
         )
     except Exception:
         log.exception("Weekly refresh failed")

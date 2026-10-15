@@ -1,4 +1,5 @@
 from datetime import date
+from unittest.mock import Mock
 
 import pytest
 
@@ -16,6 +17,38 @@ from pipeline.scraper import (
     parse_of,
     validate_loaded_source_identity,
 )
+
+
+@pytest.mark.parametrize("unplayed,event_day,expected_count", [
+    (True, "October 10, 2026", 1),
+    (False, "October 10, 2026", 2),
+    (True, "October 17, 2026", 1),
+    (True, "October 09, 2026", 2),
+])
+def test_completed_listing_defers_only_current_unplayed_cards(monkeypatch, unplayed, event_day, expected_count):
+    scraper = RateLimitedPlaywrightScraper(delay_seconds=0)
+    page = Mock()
+    current_url = "http://www.ufcstats.com/event-details/aaaaaaaaaaaaaaaa"
+    old_url = "http://www.ufcstats.com/event-details/bbbbbbbbbbbbbbbb"
+    page.locator.return_value.evaluate_all.return_value = [
+        {"url": current_url, "name": "Current card", "date": event_day, "location": "Las Vegas"},
+        {"url": old_url, "name": "Old card", "date": "March 11, 1994", "location": "Denver"},
+    ]
+    monkeypatch.setattr(scraper, "_ensure_page", lambda: page)
+    monkeypatch.setattr(scraper, "_open", lambda *args: None)
+    details = Mock(return_value={"has_unplayed_bouts": unplayed})
+    monkeypatch.setattr(scraper, "crawl_event_details", details)
+    scraper._event_metadata["stale URL from previous request"] = {}
+    result = scraper.crawl_event_listing(today=date(2026, 10, 10))
+    assert not result.errors
+    assert len(result.event_urls) == expected_count
+    assert len(result.deferred_events) == 2 - expected_count
+    assert set(scraper._event_metadata) == set(result.event_urls)
+    assert old_url in result.event_urls
+    if event_day == "October 09, 2026":
+        details.assert_not_called()  # Historical parse failures are not hidden.
+    else:
+        details.assert_called_once_with(current_url)
 
 
 def test_fight_metadata_parser_includes_first_class_method_item():

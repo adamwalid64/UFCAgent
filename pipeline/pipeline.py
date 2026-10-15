@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from . import db as database
 from .derived import rebuild_derived_state
 from .models import Event, Fight, FightRound, Fighter
+from .upcoming import save_upcoming_card
 
 
 SIGNIFICANT_STRIKE_SPLITS = ("head", "body", "leg", "distance", "clinch", "ground")
@@ -718,6 +719,7 @@ def run_pipeline(
     metadata_limit: int | None = None,
     allow_source_deletions: bool = False,
     profile_max_age_days: int = DEFAULT_PROFILE_MAX_AGE_DAYS,
+    scrape_upcoming: bool = True,
 ) -> tuple[int, int, list[str]]:
     """Reconcile UFCStats into the database and rebuild all derived history.
 
@@ -755,7 +757,22 @@ def run_pipeline(
             errors.append(message)
             return processed_events, processed_fights, errors
 
-        event_summary = scraper.crawl_event_listing(max_events=max_events)
+        existing_urls = set(
+            session.scalars(select(Event.event_url).where(Event.event_url.is_not(None)))
+        )
+        # A transient truncated listing must not force a full backfill before
+        # the coverage gate notices. Retry, but never silently drop old events
+        # or add stored URLs to the source manifest.
+        for listing_attempt in range(3):
+            event_summary = scraper.crawl_event_listing(max_events=max_events)
+            returned_urls = set(getattr(event_summary, "event_urls", []) or [])
+            if max_events is not None or not (existing_urls - returned_urls):
+                break
+            if listing_attempt < 2:
+                logging.warning(
+                    "Source listing omitted %s stored event(s); refetching (%s/3)",
+                    len(existing_urls - returned_urls), listing_attempt + 2,
+                )
         errors.extend(
             f"Listing failed: {error.source_url}: {error.message}"
             for error in getattr(event_summary, "errors", [])
@@ -764,9 +781,6 @@ def run_pipeline(
         if not listing_urls:
             errors.append("Completed-event listing returned no event URLs; database was not reconciled.")
         else:
-            existing_urls = set(
-                session.scalars(select(Event.event_url).where(Event.event_url.is_not(None)))
-            )
             if full:
                 target_urls = listing_urls
             else:
@@ -981,6 +995,21 @@ def run_pipeline(
                     logging.warning(message)
                     logging.debug("Event reconciliation failure details", exc_info=True)
                     errors.append(message)
+
+        # Legacy/custom scraper adapters may implement only completed history.
+        # The first-party scraper always supports this separate schedule feed.
+        upcoming_crawler = getattr(scraper, "crawl_upcoming_card", None)
+        if scrape_upcoming and callable(upcoming_crawler):
+            try:
+                card = upcoming_crawler()
+                count = save_upcoming_card(session, card)
+                session.commit()
+                logging.info("Next-card schedule refreshed: %s fights", count)
+            except Exception as exc:
+                session.rollback()
+                message = f"Upcoming card refresh failed: {exc}"
+                logging.warning(message)
+                errors.append(message)
 
         if backfill_metadata and not full:
             backfill_missing_event_metadata(

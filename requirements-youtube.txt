@@ -1,0 +1,8 @@
+# Optional YouTube discovery/transcript integration. Whisper is installed separately.
+requests>=2.32
+filelock>=3.16
+tzdata>=2025.1
+mcp>=1.26,<2
+jsonschema>=4.23
+youtube-transcript-api>=1.2,<2
+yt-dlp>=2026.3

@@ -1,0 +1,20 @@
+{
+  "fights": [
+    {
+      "event_date": "2026-11-01",
+      "fighter_a": "Fighter A",
+      "fighter_b": "Fighter B",
+      "odds": {
+        "bookmaker": "Example only - replace with actual bookmaker",
+        "observed_at": "2026-10-30T12:00:00Z",
+        "moneyline": {"Fighter A": -150, "Fighter B": 130}
+      },
+      "public_sentiment": {
+        "source": "Example only - replace with authorized community-pick source",
+        "observed_at": "2026-10-30T12:00:00Z",
+        "percentages": {"Fighter A": 70, "Fighter B": 30},
+        "sample_size": 1000
+      }
+    }
+  ]
+}
